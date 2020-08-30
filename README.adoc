@@ -1,0 +1,25 @@
+= goskkserv
+
+goskkserv is a SKK server written in Go.
+
+== Install
+
+You must install golang to compile goskkserv.
+
+Download golang from bellow, and install it.
+
+https://golang.org/dl/
+
+Type following to install goskkserv
+
+[source, console]
+----
+$ go get github.com/kechako/goskkserv
+----
+
+== Usage
+
+[source, console]
+----
+$ goskkserv SKK-JISYO.L
+----
