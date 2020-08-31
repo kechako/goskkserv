@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -10,11 +11,35 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/encoding/unicode"
 )
+
+type ServerEncoding string
+
+const (
+	UTF8     ServerEncoding = "utf-8"
+	EUCJP    ServerEncoding = "euc-jp"
+	ShiftJIS ServerEncoding = "sjis"
+)
+
+func ParseServerEncoding(e string) (ServerEncoding, error) {
+	se := ServerEncoding(e)
+	switch se {
+	case UTF8, EUCJP, ShiftJIS:
+		return se, nil
+	}
+
+	return "", errors.New("invalid encoding")
+}
 
 type Server struct {
 	Dict  *Dictionary
 	Debug bool
+
+	enc encoding.Encoding
 
 	listener   net.Listener
 	activeConn map[*net.Conn]struct{}
@@ -33,6 +58,7 @@ func NewServer(dict *Dictionary) *Server {
 
 	return &Server{
 		Dict:       dict,
+		enc:        unicode.UTF8,
 		activeConn: make(map[*net.Conn]struct{}),
 		loge:       log.New(os.Stderr, "[ERROR] ", log.Ldate|log.Lmicroseconds|log.Lmsgprefix),
 		logi:       log.New(os.Stdout, "[INFO ] ", log.Ldate|log.Lmicroseconds|log.Lmsgprefix),
@@ -56,6 +82,19 @@ func (s *Server) Shutdown() error {
 	}
 
 	return lerr
+}
+
+func (s *Server) SetEncoding(e ServerEncoding) {
+	switch e {
+	case UTF8:
+		s.enc = unicode.UTF8
+	case EUCJP:
+		s.enc = japanese.EUCJP
+	case ShiftJIS:
+		s.enc = japanese.ShiftJIS
+	default:
+		panic("invalid encoding")
+	}
 }
 
 func (s *Server) Listen(addr string) error {
@@ -130,6 +169,9 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 
 	s.infof("new client : %s", conn.RemoteAddr())
 
+	w := s.enc.NewEncoder().Writer(conn)
+	r := s.enc.NewDecoder().Reader(conn)
+
 	var buf [1024]byte
 	var ret bytes.Buffer
 	ret.Grow(4096)
@@ -137,7 +179,7 @@ loop:
 	for {
 		ret.Reset()
 
-		n, err := conn.Read(buf[:])
+		n, err := r.Read(buf[:])
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -195,7 +237,7 @@ loop:
 			s.infof("UNKNOWN: message from client %s: %c/\"%s\"", conn.RemoteAddr(), cmd[0], cmd)
 			continue
 		}
-		if _, err := conn.Write(ret.Bytes()); err != nil {
+		if _, err := w.Write(ret.Bytes()); err != nil {
 			s.error(err)
 			return
 		}

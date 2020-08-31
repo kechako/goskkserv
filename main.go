@@ -17,8 +17,10 @@ func main() {
 func _main() error {
 	var addr string
 	var debug bool
+	var enc string
 	flag.StringVar(&addr, "addr", "127.0.0.1:1178", "Address to listen")
 	flag.BoolVar(&debug, "debug", false, "Enable debug mode")
+	flag.StringVar(&enc, "enc", "utf-8", "Server encoding [utf-8, eucjp, sjis]")
 	flag.Parse()
 
 	var dict *Dictionary
@@ -30,8 +32,14 @@ func _main() error {
 		}
 	}
 
+	se, err := ParseServerEncoding(enc)
+	if err != nil {
+		return err
+	}
+
 	s := NewServer(dict)
 	s.Debug = debug
+	s.SetEncoding(se)
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt)
