@@ -1,69 +1,27 @@
-package main
+package skkserv
 
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"log"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/text/encoding"
-	"golang.org/x/text/encoding/japanese"
-	"golang.org/x/text/encoding/unicode"
+	"github.com/kechako/goskkserv/dict"
+	"github.com/kechako/goskkserv/log"
 )
-
-type ServerEncoding string
-
-const (
-	UTF8     ServerEncoding = "utf-8"
-	EUCJP    ServerEncoding = "euc-jp"
-	ShiftJIS ServerEncoding = "sjis"
-)
-
-func ParseServerEncoding(e string) (ServerEncoding, error) {
-	se := ServerEncoding(e)
-	switch se {
-	case UTF8, EUCJP, ShiftJIS:
-		return se, nil
-	}
-
-	return "", errors.New("invalid encoding")
-}
 
 type Server struct {
-	Dict  *Dictionary
-	Debug bool
-
-	enc encoding.Encoding
+	Dictionary *dict.Dictionary
+	Encoding   Encoding
+	Logger     log.Logger
 
 	listener   net.Listener
 	activeConn map[*net.Conn]struct{}
 	wg         sync.WaitGroup
 	exit       func()
-
-	loge *log.Logger
-	logi *log.Logger
-	logd *log.Logger
-}
-
-func NewServer(dict *Dictionary) *Server {
-	if dict == nil {
-		dict = EmptyDictionary()
-	}
-
-	return &Server{
-		Dict:       dict,
-		enc:        unicode.UTF8,
-		activeConn: make(map[*net.Conn]struct{}),
-		loge:       log.New(os.Stderr, "[ERROR] ", log.Ldate|log.Lmicroseconds|log.Lmsgprefix),
-		logi:       log.New(os.Stdout, "[INFO ] ", log.Ldate|log.Lmicroseconds|log.Lmsgprefix),
-		logd:       log.New(os.Stdout, "[DEBUG] ", log.Ldate|log.Lmicroseconds|log.Lmsgprefix),
-	}
 }
 
 func (s *Server) Shutdown() error {
@@ -78,23 +36,10 @@ func (s *Server) Shutdown() error {
 
 	for conn := range s.activeConn {
 		(*conn).Close()
-		delete(s.activeConn, conn)
+		s.setActiveConn(conn, false)
 	}
 
 	return lerr
-}
-
-func (s *Server) SetEncoding(e ServerEncoding) {
-	switch e {
-	case UTF8:
-		s.enc = unicode.UTF8
-	case EUCJP:
-		s.enc = japanese.EUCJP
-	case ShiftJIS:
-		s.enc = japanese.ShiftJIS
-	default:
-		panic("invalid encoding")
-	}
 }
 
 func (s *Server) Listen(addr string) error {
@@ -107,7 +52,7 @@ func (s *Server) Listen(addr string) error {
 		return fmt.Errorf("failed to resolve address [%s]: %w", addr, err)
 	}
 
-	s.infof("listen on [%s]...", tcpAddr)
+	s.logger().Infof("listen on [%s]...", tcpAddr)
 	l, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
 		return fmt.Errorf("failed to listen TCP [%v]: %w", tcpAddr, err)
@@ -139,7 +84,7 @@ loop:
 			return err
 		}
 		tempDelay = 0
-		s.activeConn[&c] = struct{}{}
+		s.setActiveConn(&c, true)
 		s.wg.Add(1)
 		go s.serve(ctx, c)
 	}
@@ -164,13 +109,16 @@ const (
 
 func (s *Server) serve(ctx context.Context, conn net.Conn) {
 	defer s.wg.Done()
-	defer delete(s.activeConn, &conn)
+	defer s.setActiveConn(&conn, false)
 	defer conn.Close()
 
-	s.infof("new client : %s", conn.RemoteAddr())
+	s.logger().Infof("new client : %s", conn.RemoteAddr())
 
-	w := s.enc.NewEncoder().Writer(conn)
-	r := s.enc.NewDecoder().Reader(conn)
+	encoding := s.Encoding.encoding()
+	w := encoding.NewEncoder().Writer(conn)
+	r := encoding.NewDecoder().Reader(conn)
+
+	dictionary := s.dict()
 
 	var buf [1024]byte
 	var ret bytes.Buffer
@@ -189,13 +137,13 @@ loop:
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				continue
 			}
-			s.error(err)
+			s.logger().Error("failed to read request data: ", err)
 			return
 		}
 		cmd := string(buf[:n])
 		switch cmd[0] {
 		case ClientEnd:
-			s.infof("client end : %s", conn.RemoteAddr())
+			s.logger().Infof("client end : %s", conn.RemoteAddr())
 			break loop
 		case ClientRequest:
 			i := strings.IndexByte(cmd, ' ')
@@ -207,9 +155,9 @@ loop:
 			}
 
 			key := cmd[1:i]
-			s.debugf("REQUEST: key : %s", key)
+			s.logger().Debugf("REQUEST: key : %s", key)
 
-			candidates := s.Dict.Search(key)
+			candidates := dictionary.Search(key)
 			if len(candidates) > 0 {
 				ret.WriteRune(ServerFound)
 				for _, c := range candidates {
@@ -217,57 +165,59 @@ loop:
 					ret.WriteString(c.String())
 				}
 				ret.WriteString("/\n")
-				s.debugf("REQUEST: candidate: %s", strings.TrimSpace(ret.String()))
+				s.logger().Debugf("REQUEST: candidate: %s", strings.TrimSpace(ret.String()))
 			} else {
 				ret.WriteRune(ServerNotFound)
 				ret.WriteString(cmd[1:])
-				s.debug("REQUEST: not found")
+				s.logger().Debug("REQUEST: not found")
 			}
 		case ClientVersion:
-			s.debug("VERSION")
+			s.logger().Debug("VERSION")
 			ret.WriteString("goskkserv-1.0")
 		case ClientHost:
-			s.debug("HOST")
+			s.logger().Debug("HOST")
 			ret.WriteString(conn.LocalAddr().String())
 		case ClientCompletion:
-			s.debug("COMPLETION")
+			s.logger().Debug("COMPLETION")
 			ret.WriteRune(ServerFound)
 			ret.WriteString("//\n")
 		default:
-			s.infof("UNKNOWN: message from client %s: %c/\"%s\"", conn.RemoteAddr(), cmd[0], cmd)
+			s.logger().Infof("UNKNOWN: message from client %s: %c/\"%s\"", conn.RemoteAddr(), cmd[0], cmd)
 			continue
 		}
 		if _, err := w.Write(ret.Bytes()); err != nil {
-			s.error(err)
+			s.logger().Error(err)
 			return
 		}
 	}
 }
 
-func (s *Server) error(v ...interface{}) {
-	s.loge.Print(v...)
-}
+func (s *Server) setActiveConn(conn *net.Conn, set bool) {
+	if s.activeConn == nil {
+		s.activeConn = make(map[*net.Conn]struct{})
+	}
 
-func (s *Server) errorf(format string, v ...interface{}) {
-	s.loge.Printf(format, v...)
-}
-
-func (s *Server) info(v ...interface{}) {
-	s.logi.Print(v...)
-}
-
-func (s *Server) infof(format string, v ...interface{}) {
-	s.logi.Printf(format, v...)
-}
-
-func (s *Server) debug(v ...interface{}) {
-	if s.Debug {
-		s.logd.Print(v...)
+	if set {
+		s.activeConn[conn] = struct{}{}
+	} else {
+		delete(s.activeConn, conn)
 	}
 }
 
-func (s *Server) debugf(format string, v ...interface{}) {
-	if s.Debug {
-		s.logd.Printf(format, v...)
+func (s *Server) dict() *dict.Dictionary {
+	if s.Dictionary != nil {
+		return s.Dictionary
 	}
+
+	return &dict.Dictionary{}
+}
+
+var nopLogger = log.NewNop()
+
+func (s *Server) logger() log.Logger {
+	if s.Logger != nil {
+		return s.Logger
+	}
+
+	return nopLogger
 }

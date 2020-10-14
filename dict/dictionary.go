@@ -1,4 +1,4 @@
-package main
+package dict
 
 import (
 	"bufio"
@@ -14,78 +14,21 @@ import (
 	"golang.org/x/text/transform"
 )
 
-type Candidate struct {
-	Text       string
-	Annotation string
-}
-
-func (c *Candidate) String() string {
-	if len(c.Annotation) == 0 {
-		return c.Text
-	}
-
-	var s strings.Builder
-	s.Grow(len(c.Text) + len(c.Annotation) + 2)
-
-	s.WriteString(c.Text)
-	s.WriteString("; ")
-	s.WriteString(c.Annotation)
-
-	return s.String()
-}
-
-type entry struct {
-	candidates []*Candidate
-	candSet    map[string]struct{}
-}
-
-func newEntry() *entry {
-	return &entry{
-		candSet: make(map[string]struct{}),
-	}
-}
-
-func (e *entry) add(text, annotation string) bool {
-	if _, ok := e.candSet[text]; ok {
-		return false
-	}
-
-	cand := &Candidate{
-		Text:       text,
-		Annotation: annotation,
-	}
-	e.candSet[text] = struct{}{}
-	e.candidates = append(e.candidates, cand)
-
-	return true
-}
-
 type Dictionary struct {
 	table map[string]*entry
 	mu    sync.RWMutex
 }
 
-func EmptyDictionary() *Dictionary {
-	return &Dictionary{
-		table: make(map[string]*entry),
-	}
-}
-
 var magicCommentRegex = regexp.MustCompile(`-\*-.*[ \t]coding:[ \t]*([^ \t;]+?)[ \t;].*-\*-`)
 
-func OpenDictionary(names ...string) (*Dictionary, error) {
-	table := make(map[string]*entry)
+func (d *Dictionary) Add(name string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
-	for _, name := range names {
-		if err := loadDictionary(name, table); err != nil {
-			return nil, err
-		}
+	if d.table == nil {
+		d.table = make(map[string]*entry)
 	}
 
-	return &Dictionary{table: table}, nil
-}
-
-func loadDictionary(name string, table map[string]*entry) error {
 	file, err := os.Open(name)
 	if err != nil {
 		return fmt.Errorf("failed to open dictionary file %s: %w", name, err)
@@ -127,10 +70,10 @@ func loadDictionary(name string, table map[string]*entry) error {
 		key := line[:i]
 		candidates := strings.Split(line[i+1:len(line)-1], "/")
 
-		entry := table[key]
+		entry := d.table[key]
 		if entry == nil {
 			entry = newEntry()
-			table[key] = entry
+			d.table[key] = entry
 		}
 
 		for _, candidate := range candidates {
@@ -170,14 +113,18 @@ func wrapEncDecoder(r io.Reader, enc string) (*bufio.Reader, error) {
 	return br, nil
 }
 
-func (d *Dictionary) Search(key string) []*Candidate {
+func (d *Dictionary) Search(key string) []Candidate {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+
+	if d.table == nil {
+		return nil
+	}
 
 	entry, ok := d.table[key]
 	if !ok {
 		return nil
 	}
 
-	return entry.candidates
+	return entry.Candidates()
 }

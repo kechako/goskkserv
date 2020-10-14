@@ -14,7 +14,7 @@ Type following to install goskkserv
 
 [source, console]
 ----
-$ go get github.com/kechako/goskkserv
+$ go get github.com/kechako/goskkserv/cmd/goskkserv
 ----
 
 == Usage
