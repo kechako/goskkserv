@@ -3,7 +3,9 @@ package skkserv
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -136,6 +138,10 @@ loop:
 			}
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				continue
+			}
+			if errors.Is(err, io.EOF) {
+				// client closed
+				break loop
 			}
 			s.logger().Error("failed to read request data: ", err)
 			return
